@@ -176,6 +176,51 @@ def parse_compact_text(text):
         columns.append(current_col)
     
     return columns
+def parse_text_to_columns(text):
+    """
+    Procesa texto con múltiples columnas identificadas por la palabra 'columna'
+    Ejemplo de formato:
+    "columna Edad datos 25 30 28 columna Nombre datos Juan Pedro Ana"
+    """
+    columns = []
+    current_col = None
+    words = text.split()
+    i = 0
+    
+    while i < len(words):
+        if words[i].lower() == 'columna' and i+1 < len(words):
+            if current_col:  # Guardar la columna anterior
+                columns.append(current_col)
+            # Nueva columna
+            current_col = {
+                'name': words[i+1],
+                'unit': '',
+                'notes': '',
+                'values': []
+            }
+            i += 2
+        elif current_col is not None:
+            if words[i].lower() == 'unidad' and i+1 < len(words):
+                current_col['unit'] = words[i+1]
+                i += 2
+            elif words[i].lower() in ['apreciacion', 'apreciación'] and i+1 < len(words):
+                current_col['notes'] = words[i+1]
+                i += 2
+            elif words[i].lower() == 'datos':
+                i += 1
+                # Capturar todos los valores hasta la próxima columna
+                while i < len(words) and words[i].lower() not in ['columna', 'unidad', 'apreciacion', 'apreciación']:
+                    current_col['values'].append(words[i])
+                    i += 1
+            else:
+                i += 1
+        else:
+            i += 1
+    
+    if current_col:  # Añadir la última columna procesada
+        columns.append(current_col)
+    
+    return columns
 
 def get_unprocessed_files():
     """Obtiene archivos .txt no procesados"""
@@ -215,10 +260,10 @@ def process_file(file_id):
             # Formato línea única
             data_line = content.split('\n')[0].strip()
             print(f"Datos extraídos (línea única):\n{data_line}\n")  # Debug
-            columns = parse_compact_text(data_line)
-        
+            columns = parse_text_to_columns(content)
+    
         if not columns:
-            print("¡No se encontraron columnas válidas!")
+            print("⚠️ No se encontraron columnas válidas en el archivo")
             return None
         
         print(f"Columnas procesadas: {columns}\n")  # Debug
