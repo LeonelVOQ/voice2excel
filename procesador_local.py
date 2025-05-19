@@ -77,62 +77,13 @@ def parse_compact_text(text):
     
     return columns
 
-def get_unprocessed_files():
-    """Obtiene archivos .txt no procesados"""
-    query = f"'{FOLDER_ID}' in parents and mimeType='text/plain' and name contains 'datos_tabla_'"
-    results = drive_service.files().list(q=query, fields="files(id,name)").execute()
-    return results.get('files', [])
-
-def mark_as_processed(file_id):
-    """Renombra el archivo para marcarlo como procesado"""
-    drive_service.files().update(
-        fileId=file_id,
-        body={'name': f"PROCESADO_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"},  # Cambiado aquí
-        fields='name'
-    ).execute()
-
-def process_file(file_id):
-    """Descarga, procesa y sube el Excel"""
-    # Descargar archivo
-    request = drive_service.files().get_media(fileId=file_id)
-    fh = BytesIO()
-    downloader = MediaIoBaseDownload(fh, request)
-    
-    done = False
-    while not done:
-        status, done = downloader.next_chunk()
-    
-    content = fh.getvalue().decode('utf-8')
-    
-    # Extraer sección de datos
-    if '---DATOS---' in content:
-        # Formato multi-línea original
-        data_match = re.search(r'---DATOS---\n(.+)', content, re.DOTALL)
-        if not data_match:
-            return None
-        texto = data_match.group(1).strip()
-    else:
-        # Nuevo formato de línea única
-        texto = content.split('\n', 1)[0].strip()  # Toma solo la primera línea
-
-    # Parsear según el formato detectado
-    if '\n' in texto:  # Formato multi-línea
-        columns = []
-        current_col = {}
-        mode = None
-        
-        for line in texto.split('\n'):
-            line = line.strip().lower()
-            # ... (mantén el resto del parsing original)
-    else:  # Formato de línea única
-        columns = parse_compact_text(texto)
-    
-    # Procesamiento
+def parse_multiline_format(text):
+    """Procesa el formato multi-línea"""
     columns = []
     current_col = {}
     mode = None
     
-    for line in texto.split('\n'):
+    for line in text.split('\n'):
         line = line.strip().lower()
         
         if line.startswith('Columna'):
@@ -165,62 +116,169 @@ def process_file(file_id):
     if current_col:
         columns.append(current_col)
     
-    # Crear Excel en memoria
-    output = BytesIO()
-    wb = openpyxl.Workbook()
-    ws = wb.active
+    return columns
+
+def parse_compact_text(text):
+    """Procesa el formato de línea única"""
+    elements = []
+    current = []
+    in_quotes = False
     
-    # Escribir encabezados
-    for i, col in enumerate(columns, 1):
-        ws.cell(row=1, column=i, value=col['name']).font = openpyxl.styles.Font(bold=True)
-        ws.cell(row=2, column=i, value=f"Unidad: {col['unit']}")
-        ws.cell(row=3, column=i, value=f"Notas: {col['notes']}")
+    # Separar considerando comillas
+    for part in text.split(' '):
+        if not part:
+            continue
+        if part.startswith('"') and not in_quotes:
+            in_quotes = True
+            current.append(part[1:])
+        elif part.endswith('"') and in_quotes:
+            in_quotes = False
+            current.append(part[:-1])
+            elements.append(' '.join(current))
+            current = []
+        elif in_quotes:
+            current.append(part)
+        else:
+            elements.append(part)
+    
+    # Procesar elementos
+    columns = []
+    current_col = {}
+    i = 0
+    n = len(elements)
+    
+    while i < n:
+        if elements[i] == 'Columna' and i+1 < n:
+            if current_col:
+                columns.append(current_col)
+            current_col = {
+                'name': elements[i+1],
+                'unit': '',
+                'notes': '',
+                'values': []
+            }
+            i += 2
+        elif elements[i] == 'unidad' and i+1 < n and current_col:
+            current_col['unit'] = elements[i+1]
+            i += 2
+        elif (elements[i] in ['apreciacion', 'apreciación']) and i+1 < n and current_col:
+            current_col['notes'] = elements[i+1]
+            i += 2
+        elif elements[i] == 'datos' and current_col:
+            i += 1
+            while i < n and elements[i] not in ['Columna', 'unidad', 'apreciacion', 'apreciación']:
+                current_col['values'].append(elements[i])
+                i += 1
+        else:
+            i += 1
+    
+    if current_col:
+        columns.append(current_col)
+    
+    return columns
+
+def get_unprocessed_files():
+    """Obtiene archivos .txt no procesados"""
+    query = f"'{FOLDER_ID}' in parents and mimeType='text/plain' and name contains 'datos_tabla_'"
+    results = drive_service.files().list(q=query, fields="files(id,name)").execute()
+    return results.get('files', [])
+
+def mark_as_processed(file_id):
+    """Renombra el archivo para marcarlo como procesado"""
+    drive_service.files().update(
+        fileId=file_id,
+        body={'name': f"PROCESADO_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"},  # Cambiado aquí
+        fields='name'
+    ).execute()
+
+def process_file(file_id):
+    try:
+        # Descargar archivo
+        request = drive_service.files().get_media(fileId=file_id)
+        fh = BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+        
+        done = False
+        while not done:
+            status, done = downloader.next_chunk()
+        
+        content = fh.getvalue().decode('utf-8')
+        print(f"\nContenido crudo del archivo:\n{content}\n")  # Debug
+        
+        # Determinar formato y extraer datos
+        if '---DATOS---' in content:
+            # Formato multi-línea
+            data_section = content.split('---DATOS---')[1].strip()
+            print(f"Datos extraídos (multilínea):\n{data_section}\n")  # Debug
+            columns = parse_multiline_format(data_section)
+        else:
+            # Formato línea única
+            data_line = content.split('\n')[0].strip()
+            print(f"Datos extraídos (línea única):\n{data_line}\n")  # Debug
+            columns = parse_compact_text(data_line)
+        
+        if not columns:
+            print("¡No se encontraron columnas válidas!")
+            return None
+        
+        print(f"Columnas procesadas: {columns}\n")  # Debug
+        
+        # Crear Excel
+        output = BytesIO()
+        wb = openpyxl.Workbook()
+        ws = wb.active
         
         # Escribir datos
-        for row_idx, value in enumerate(col['values'], 4):
-            try:
-                num_value = float(value)
-                ws.cell(row=row_idx, column=i, value=num_value)
-            except ValueError:
-                ws.cell(row=row_idx, column=i, value=value)
+        for col_idx, col in enumerate(columns, 1):
+            # Encabezado
+            ws.cell(row=1, column=col_idx, value=col['name'])
+            
+            # Unidad (fila 2)
+            if col['unit']:
+                ws.cell(row=2, column=col_idx, value=f"Unidad: {col['unit']}")
+            
+            # Apreciación (fila 3)
+            if col['notes']:
+                ws.cell(row=3, column=col_idx, value=f"Apreciación: {col['notes']}")
+            
+            # Valores (desde fila 4)
+            for row_idx, value in enumerate(col['values'], 4):
+                try:
+                    num_value = float(value)
+                    ws.cell(row=row_idx, column=col_idx, value=num_value)
+                except ValueError:
+                    ws.cell(row=row_idx, column=col_idx, value=value)
+        
+        # Guardar y subir
+        wb.save(output)
+        output.seek(0)
+        
+        # Subir a Drive
+        excel_name = f"tabla_procesada_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        file_metadata = {
+            'name': excel_name,
+            'parents': [FOLDER_ID],
+            'mimeType': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        }
+        
+        media = MediaIoBaseUpload(
+            output,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            resumable=True
+        )
+        
+        uploaded_file = drive_service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields='id,name,webViewLink'
+        ).execute()
+        
+        print(f"Archivo Excel creado: {uploaded_file.get('name')}")
+        return uploaded_file.get('name')
     
-    # Ajustar columnas
-    for col in ws.columns:
-        max_length = 0
-        column = col[0].column_letter
-        for cell in col:
-            try:
-                if len(str(cell.value)) > max_length:
-                    max_length = len(str(cell.value))
-            except:
-                pass
-        adjusted_width = (max_length + 2) * 1.2
-        ws.column_dimensions[column].width = adjusted_width
-    
-    wb.save(output)
-    output.seek(0)
-    
-    # Subir a Drive
-    excel_name = f"tabla_procesada_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-    file_metadata = {
-        'name': excel_name,
-        'parents': [FOLDER_ID],
-        'mimeType': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-    }
-    
-    media = MediaIoBaseUpload(
-        output,
-        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        resumable=True
-    )
-    
-    drive_service.files().create(
-        body=file_metadata,
-        media_body=media,
-        fields='id,name,webViewLink'
-    ).execute()
-    
-    return excel_name
+    except Exception as e:
+        print(f"Error en process_file: {str(e)}")
+        raise
 
 def main_loop():
     """Bucle principal de monitoreo"""
